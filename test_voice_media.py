@@ -12,6 +12,7 @@ import wave
 import sounddevice as sd
 import vosk
 
+import favorites_player as fp
 from matcher import CommandMatcher
 import media_keys as mk
 from ru_numbers import parse_duration_seconds, parse_number
@@ -95,7 +96,40 @@ def test_multi_turn_and_matcher() -> None:
     matcher.disarm()
     assert matcher.match("терри выключи комп", is_partial=False, now=t) is None
 
-    print("[OK] Multi-turn 5s wake + 3s follow-up & matcher tests passed")
+    # Favorites priority & combinations (SoundCloud default, Spotify when mentioned)
+    fav_cases = [
+        ("терри включи любимое", "play_favorites_sc"),
+        ("терри включи любимые треки", "play_favorites_sc"),
+        ("терри поставь мои лайки", "play_favorites_sc"),
+        ("терри запусти любимую музыку", "play_favorites_sc"),
+        ("терри открой избранное", "play_favorites_sc"),
+        ("терри любимые треки", "play_favorites_sc"),
+        ("терри включи любимые треки в ск", "play_favorites_sc"),
+        ("терри включи любимые треки вписка", "play_favorites_sc"),
+        ("терри включи любимые треки в саунд клауд", "play_favorites_sc"),
+        ("терри включи ск", "play_favorites_sc"),
+        ("терри включи любимые треки в спотифай", "play_favorites_spotify"),
+        ("терри включи любимые треки вспотевший", "play_favorites_spotify"),
+        ("терри включи любимое в спотике", "play_favorites_spotify"),
+        ("терри включи любимые вспотел", "play_favorites_spotify"),
+        ("терри включи лайки в спотифае", "play_favorites_spotify"),
+        ("терри запусти спотик", "play_favorites_spotify"),
+        # Must NOT hijack normal "включи музыку" (resume) or "включи следующий" (next)
+        ("терри включи музыку", "resume"),
+        ("терри включи следующий", "next"),
+    ]
+    t = 500.0
+    for phrase, exp_act in fav_cases:
+        t += 2.0
+        matcher.disarm()
+        # Partial must wait so trailing "в спотифай" isn't lost
+        if exp_act.startswith("play_favorites"):
+            assert matcher.match(phrase, is_partial=True, now=t).action == "wake"
+            assert matcher.match(phrase, is_partial=True, now=t + 0.1) is None
+        res = matcher.match(phrase, is_partial=False, now=t + 0.6)
+        assert res and res.action == exp_act, f"Favorites failed for {phrase!r}: expected {exp_act}, got {res}"
+
+    print("[OK] Multi-turn 5s wake + 3s follow-up, favorites priority & matcher tests passed")
 
 
 def test_duck_session_math() -> None:
@@ -166,9 +200,18 @@ def test_live_core_audio_and_vosk() -> None:
     model = vosk.Model(str(MODEL_PATH))
     matcher = CommandMatcher.from_file(CONFIG_PATH)
 
-    # Simulate multi-turn real TTS: "Терри, тише" then "тише" (within 3s)
+    # Simulate multi-turn real TTS + favorites voice recognition via Vosk
     t = 50.0
-    for spoken, exp_act in [("Терри, тише", "volume_down"), ("тише", "volume_down"), ("дальше", "next")]:
+    for spoken, exp_act in [
+        ("Терри, тише", "volume_down"),
+        ("тише", "volume_down"),
+        ("дальше", "next"),
+        ("Терри, включи любимое", "play_favorites_sc"),
+        ("Терри, включи любимые треки в ск", "play_favorites_sc"),
+        ("Терри, включи любимые треки в саундклауд", "play_favorites_sc"),
+        ("Терри, включи любимые треки в спотифай", "play_favorites_spotify"),
+        ("Терри, включи любимое в спотике", "play_favorites_spotify"),
+    ]:
         wav = Path(tempfile.gettempdir()) / "terry_mt.wav"
         ps = (
             "Add-Type -AssemblyName System.Speech; "
@@ -187,18 +230,28 @@ def test_live_core_audio_and_vosk() -> None:
         wav.unlink(missing_ok=True)
         t += 1.5
         res = matcher.match(heard, is_partial=False, now=t)
-        print(f"  [E2E multi-turn] {spoken:14s} -> {heard!r:14s} -> {res.action if res else None} (extend={res.session_seconds if res else 0}s)")
-        assert res and res.action == exp_act
+        print(f"  [E2E] {spoken:42s} -> {heard!r:44s} -> {res.action if res else None}")
+        assert res and res.action == exp_act, f"E2E mismatch for {spoken!r}: heard={heard!r}, got={res}"
 
     print(f"[OK] Default input microphone: {sd.query_devices(kind='input')['name']}")
+
+
+def test_favorites_discovery() -> None:
+    sc = fp.find_soundcloud_app()
+    sp = fp.find_spotify_app()
+    sp_uri = fp.is_spotify_uri_registered()
+    print(f"[OK] Discovery: SoundCloud={sc}, Spotify={sp}, spotify_uri={sp_uri}")
+    assert sc is not None, "Expected SoundCloud to be detected on this PC"
+    assert sp_uri or sp is not None, "Expected Spotify to be detected on this PC"
 
 
 def main() -> None:
     test_ru_numbers()
     test_multi_turn_and_matcher()
     test_duck_session_math()
+    test_favorites_discovery()
     test_live_core_audio_and_vosk()
-    print("\nALL TERRY DUCKING & MULTI-TURN TESTS PASSED.")
+    print("\nALL TERRY DUCKING, FAVORITES & MULTI-TURN TESTS PASSED.")
 
 
 if __name__ == "__main__":

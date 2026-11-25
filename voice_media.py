@@ -28,6 +28,7 @@ import pystray
 import sounddevice as sd
 import vosk
 
+import favorites_player as fp
 from matcher import CommandMatcher
 import media_keys as mk
 
@@ -128,6 +129,7 @@ class VoiceMediaApp:
         self.shutdown_target_ts: float | None = None
 
         self._session_lock = threading.RLock()
+        self._player_lock = threading.Lock()
         self.duck_session = mk.VolumeDuckSession(factor=float(self.config.get("duck_factor", 0.5)))
         self._session_active = False
         self._session_deadline: float = 0.0
@@ -282,6 +284,19 @@ class VoiceMediaApp:
             self._activate_session(match.session_seconds, status="Терри слушает…")
             if not match.is_partial:
                 rec.Reset()
+            return
+
+        if match.action in {"play_favorites_sc", "play_favorites_spotify"}:
+            service = "spotify" if match.action == "play_favorites_spotify" else "soundcloud"
+            log.info(
+                "TRIGGER action=%s service=%s phrase=%r heard=%r",
+                match.action,
+                service,
+                match.phrase,
+                match.heard,
+            )
+            rec.Reset()
+            self._launch_favorites_async(service)
             return
 
         # Make sure ducking is engaged before modifying volume if the command came straight from final
@@ -490,6 +505,37 @@ class VoiceMediaApp:
         if self.tray is not None:
             self.tray.update_menu()
 
+    def _launch_favorites_async(self, service: str) -> None:
+        if not self._player_lock.acquire(blocking=False):
+            log.info("Favorites launcher already busy; skipping duplicate request for %s", service)
+            return
+
+        title_hint = "Spotify" if service == "spotify" else "SoundCloud"
+        self._flash_triggered(f"Открываю любимые ({title_hint})…", keep_armed=False)
+
+        def _worker() -> None:
+            try:
+                # Restore ducked volume before playback starts so music plays at full volume
+                self._end_session()
+                label, meta = fp.play_favorites(service, config=self.config)
+                self._flash_triggered(label, keep_armed=False)
+                if meta.get("mode") == "browser":
+                    self._notify("Терри — Музыка", f"Приложение не найдено, открыто в браузере: {label}")
+            except Exception as exc:
+                log.exception("Failed to launch favorites for %s: %s", service, exc)
+                self._flash_triggered(f"Ошибка запуска {title_hint}", keep_armed=False)
+            finally:
+                self._player_lock.release()
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    def _play_sc_menu(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._launch_favorites_async("soundcloud")
+
+    def _play_spotify_menu(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._launch_favorites_async("spotify")
+
     def _cancel_shutdown_menu(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         label, _meta = mk.send_media_action("shutdown_cancel")
         self.shutdown_target_time = None
@@ -559,6 +605,8 @@ class VoiceMediaApp:
                 self._toggle_pause,
                 default=True,
             ),
+            pystray.MenuItem("Включить любимые (SoundCloud)", self._play_sc_menu),
+            pystray.MenuItem("Включить любимые (Spotify)", self._play_spotify_menu),
             pystray.MenuItem("Отменить выключение ПК", self._cancel_shutdown_menu),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Микрофон", self._build_mic_submenu()),

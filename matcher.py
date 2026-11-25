@@ -68,6 +68,26 @@ class CommandMatcher:
             normalize_text(w) for w in config.get("volume_set_keywords", ["громкость", "звук"]) if normalize_text(w)
         }
 
+        fav_cfg = config.get("favorites_config", {})
+        self._fav_actions = {
+            normalize_text(w) for w in fav_cfg.get("action_words", []) if normalize_text(w)
+        }
+        self._fav_markers = sorted(
+            {normalize_text(p) for p in fav_cfg.get("favorite_markers", []) if normalize_text(p)},
+            key=len,
+            reverse=True,
+        )
+        self._spotify_markers = sorted(
+            {normalize_text(p) for p in fav_cfg.get("spotify_markers", []) if normalize_text(p)},
+            key=len,
+            reverse=True,
+        )
+        self._soundcloud_markers = sorted(
+            {normalize_text(p) for p in fav_cfg.get("soundcloud_markers", []) if normalize_text(p)},
+            key=len,
+            reverse=True,
+        )
+
         self._phrases: list[tuple[str, str]] = []
         self._standalone: list[tuple[str, str]] = []
         commands = config.get("commands", {})
@@ -232,6 +252,36 @@ class CommandMatcher:
                     keep_session=keep_session,
                 )
             return None
+
+        # ------------------------------------------------------------------
+        # 2b. Liked Tracks / Favorites (SoundCloud priority; Spotify if named)
+        #     Wait for final utterance so trailing "в спотифай" isn't missed.
+        # ------------------------------------------------------------------
+        fav_hit = next((m for m in self._fav_markers if self._contains_phrase(padded, m)), None)
+        sp_hit = next((m for m in self._spotify_markers if self._contains_phrase(padded, m)), None)
+        sc_hit = next((m for m in self._soundcloud_markers if self._contains_phrase(padded, m)), None)
+        has_action_verb = any(w in self._fav_actions for w in cmd_words)
+
+        if fav_hit is not None or (has_action_verb and (sp_hit is not None or sc_hit is not None)):
+            if is_partial:
+                return None
+            if sp_hit is not None:
+                return self._finish(
+                    ts,
+                    "play_favorites_spotify",
+                    f"{fav_hit or 'спотифай'} ({sp_hit})",
+                    norm,
+                    False,
+                    keep_session=keep_session,
+                )
+            return self._finish(
+                ts,
+                "play_favorites_sc",
+                f"{fav_hit or 'ск'}" + (f" ({sc_hit})" if sc_hit else ""),
+                norm,
+                False,
+                keep_session=keep_session,
+            )
 
         # ------------------------------------------------------------------
         # 3. Relative volume ("громче [на N]", "тише [на N]")
